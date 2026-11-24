@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>THERM-6 measurement channels</title>
+  <meta name="author" content="Technical RAG demo corpus">
+  <meta name="citation_publication_date" content="2026">
+</head>
+<body>
+<nav>Navigation menu</nav>
+<main>
+  <h1 id="measurements">Measurement channels</h1>
+  <p>The NG-4 recorder samples channel TS-04 every 200 ms.</p>
+  <thermal-note id="reference">The reference thermocouple uncertainty is ±0.25 °C.</thermal-note>
+  <h2 id="telemetry">Telemetry export</h2>
+  <ol><li>Connect the RS-485 adapter.</li><li>Set the bit rate to 115200 baud.</li></ol>
+  <table><caption>Export fields</caption><tr><th>Field</th><th>Unit</th></tr>
+    <tr><td>temperature</td><td>°C</td></tr></table>
+  <pre>telemetry dump --channel TS-04</pre>
+  <p>See the <a href="./controller.md">controller handbook</a>.</p>
+  <div hidden>Internal placeholder</div>
+  <script>const excluded = "INACTIVE_PAYLOAD";</script>
+</main>
+</body>
+</html>

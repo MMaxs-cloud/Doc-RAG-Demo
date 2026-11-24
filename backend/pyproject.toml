@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "technical-rag"
+version = "0.6.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi==0.165.0", "uvicorn==0.34.3", "python-multipart==0.0.26",
+  "pydantic>=2.11,<3", "httpx==0.28.1", "python-dotenv==1.2.3",
+  "PyYAML>=6,<7", "psutil>=7,<8", "charset-normalizer>=3.4,<4",
+  "markdown-it-py>=4,<5", "beautifulsoup4==4.14.3", "lxml>=6,<7",
+  "python-docx==1.2.0", "PyMuPDF==1.26.7", "olefile==0.47",
+]
+
+[project.optional-dependencies]
+tokenizer = ["transformers>=4.57,<6"]
+inference = ["torch>=2.7,<3", "transformers>=4.57,<6"]
+pdf = ["docling>=2.90,<3"]
+test = ["pytest==8.4.2"]
+
+[tool.setuptools.packages.find]
+include = ["app*", "worker*", "inference*"]
+
+[tool.setuptools.package-data]
+app = ["storage/*.sql", "generation/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: requires real infrastructure and model artifacts"]

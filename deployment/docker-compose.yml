@@ -1,0 +1,129 @@
+name: technical-rag
+
+x-settings: &settings
+  TRAG_DATA: /data
+  TRAG_CONFIG: /srv/configs/default.yaml
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  TRAG_QDRANT_URL: http://qdrant:6333
+  TRAG_EMBED_URL: http://embeddings:8091
+  TRAG_EMBED_PATH: /models/embeddings
+  TRAG_PARSER_SOCKET: /run/trag/parser.sock
+
+services:
+  frontend:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.frontend
+    ports:
+      - "127.0.0.1:${TRAG_WEB_PORT:-5173}:8080"
+    networks: [internal, edge]
+    depends_on: [backend]
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.backend
+      target: api
+    environment:
+      <<: *settings
+      TRAG_ENVIRONMENT: production
+      TRAG_USER: ${TRAG_USER:?Set TRAG_USER in .env}
+      TRAG_PASSWORD: ${TRAG_PASSWORD:?Set TRAG_PASSWORD in .env}
+      TRAG_LOCAL_URL: ${TRAG_LOCAL_URL:-http://llama:8080}
+      TRAG_LOCAL_MODEL: GigaChat3.1-10B-A1.8B
+      TRAG_CLOUD_ALLOWED: ${TRAG_CLOUD_ALLOWED:-false}
+      TRAG_GIGACHAT_CREDENTIALS: ${TRAG_GIGACHAT_CREDENTIALS:-}
+      TRAG_GIGACHAT_MODEL: ${TRAG_GIGACHAT_MODEL:-}
+      TRAG_GIGACHAT_SCOPE: ${TRAG_GIGACHAT_SCOPE:-GIGACHAT_API_CORP}
+      TRAG_GIGACHAT_CA_FILE: ${TRAG_DEPLOY_CA_FILE:-}
+    command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000", --no-access-log]
+    volumes:
+      - ../data/application:/data
+      - ../data/ca:/ca:ro
+    networks: [internal, edge]
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.backend
+      target: worker
+    environment: *settings
+    command: [python, -m, worker.service]
+    volumes:
+      - ../data/application:/data
+      - ../data/models:/models:ro
+      - parser_socket:/run/trag
+    networks: [internal]
+    depends_on: [qdrant, parser, embeddings]
+    restart: unless-stopped
+
+  parser:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.backend
+      target: parser
+    environment:
+      <<: *settings
+      TRAG_ISOLATED_PARSER: "1"
+      XDG_CACHE_HOME: /tmp/.cache
+      TRAG_DOCLING_ARTIFACTS: /models/docling
+    command: [python, -m, app.parsing.runner, serve]
+    volumes:
+      - ../data/application/temporary:/data/temporary
+      - ../data/models:/models:ro
+      - parser_socket:/run/trag
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    pids_limit: 100
+    mem_limit: 6g
+    cpus: 4
+    restart: unless-stopped
+
+  embeddings:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.backend
+      target: embeddings
+    environment:
+      <<: *settings
+      TRAG_EMBED_DEVICE: ${TRAG_EMBED_DEVICE:-cpu}
+      HF_MODULES_CACHE: /tmp/hf-modules
+    command: [uvicorn, inference.service:app, --host, 0.0.0.0, --port, "8091", --no-access-log]
+    volumes:
+      - ../data/models:/models:ro
+    networks: [internal]
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.2
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - ../data/qdrant:/qdrant/storage
+    networks: [internal]
+    restart: unless-stopped
+
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-b12648
+    profiles: [local]
+    command: [--model, /models/GigaChat3.1-10B-A1.8B-q4_K_M.gguf, --alias, GigaChat3.1-10B-A1.8B,
+              --host, 0.0.0.0, --port, "8080", --ctx-size, "8192", --parallel, "1", --jinja]
+    volumes:
+      - ../data/models:/models:ro
+    networks: [internal]
+    restart: unless-stopped
+
+networks:
+  internal:
+    internal: true
+  edge: {}
+
+volumes:
+  parser_socket:

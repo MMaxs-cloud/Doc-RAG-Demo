@@ -1,0 +1,9 @@
+# Модели
+
+**Embeddings.** `ai-sage/Giga-Embeddings-instruct-480M-0826`, revision `1763d603adac8057bd6482a708001b0ed2e0a903`. Используются fast tokenizer исходной модели, attention-mask mean pooling и L2-нормализация. Размерность 1024 установлена по конфигурации и проверяется при inference. Префикс запроса имеет вид `Instruct: …\nQuery: …`. Чанки кодируются без префикса. Вход не обрезается автоматически. Векторы хранятся как float32. На GPU модель использует bfloat16, на CPU float32. При CUDA OOM уменьшается batch. При невозможности обработки одного элемента модель переходит на CPU. [Карточка модели](https://huggingface.co/ai-sage/Giga-Embeddings-instruct-480M-0826).
+
+**Локальная генерация.** Официальный `GigaChat3.1-10B-A1.8B-q4_K_M.gguf` из репозитория GigaChat 3.1 Lightning, revision `97045b260251cfa86f5ad25638fa2dd074153446`. Используется llama.cpp с Jinja chat template из GGUF. Контекст считается через `/apply-template` и `/tokenize`. Окно по умолчанию 8192, GPU offload настраивается отдельно. [Карточка GGUF](https://huggingface.co/ai-sage/GigaChat3.1-10B-A1.8B-GGUF), [llama.cpp REST API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+
+**Облачная генерация.** GigaChat API использует OAuth с кешированием токена, подтверждение передачи контекста, проверку TLS и SSE. Имя модели задаётся оператором. Бюджет рассчитывается консервативной оценкой по UTF-8 и запасу на шаблон. Локальный провайдер не переключается автоматически. [Авторизация](https://developers.sber.ru/docs/ru/gigachat/api/reference/rest/gigachat-api), [потоковый режим](https://developers.sber.ru/docs/ru/gigachat/guides/response-token-streaming).
+
+При сочетании обеих локальных моделей на одной GPU можно использовать CPU embeddings или уменьшить offload llama.cpp. Реальные измерения приведены в [отчёте](REPORT.md).

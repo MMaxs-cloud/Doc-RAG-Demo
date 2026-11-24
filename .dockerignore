@@ -1,0 +1,11 @@
+data
+.git
+.git-data
+.venv
+.env
+**/__pycache__
+**/node_modules
+**/dist
+**/.pytest_cache
+**/test-results
+**/playwright-report

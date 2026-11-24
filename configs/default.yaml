@@ -1,0 +1,40 @@
+application:
+  name: Technical RAG
+  version: "0.6"
+documents:
+  max_file_size_mb: 100
+  max_docx_uncompressed_mb: 256
+parsing:
+  timeout_seconds: 180
+  conversion_timeout_seconds: 60
+  ocr_enabled: false
+  pdf_device: cpu
+  pdf_fallback: true
+embeddings:
+  model: ai-sage/Giga-Embeddings-instruct-480M-0826
+  revision: 1763d603adac8057bd6482a708001b0ed2e0a903
+  dimension: 1024
+  batch_size: 16
+  query_instruction: Given a query, retrieve relevant passages from scientific and technical documents.
+chunking:
+  size: 512
+  overlap: 80
+retrieval:
+  dense_top_k: 20
+  bm25_top_k: 20
+  final_top_k: 8
+  rrf_k: 60
+  max_chunks_per_document: 3
+  diversity_enabled: true
+context:
+  target_tokens: 5000
+  max_sources: 8
+generation:
+  local_window: 8192
+  api_window: 8192
+  temperature: 0.1
+  max_output_tokens: 1000
+  timeout_seconds: 120
+jobs:
+  lease_seconds: 90
+  attempts: 3

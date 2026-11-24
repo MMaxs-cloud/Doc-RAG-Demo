@@ -1,0 +1,10 @@
+services:
+  embeddings:
+    environment:
+      TRAG_EMBED_DEVICE: cuda
+    gpus: all
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b12648
+    gpus: all
+    command: [--model, /models/GigaChat3.1-10B-A1.8B-q4_K_M.gguf, --alias, GigaChat3.1-10B-A1.8B,
+              --host, 0.0.0.0, --port, "8080", --ctx-size, "8192", --parallel, "1", --jinja, --n-gpu-layers, "99"]
