@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 import math
 import statistics
 import os
@@ -55,6 +56,9 @@ def test_real_embeddings_qdrant_and_document_lifecycle():
                 assert not any(w.startswith("pdf_fallback:") for w in canonical["warnings"]), canonical["warnings"]
                 assert any(block["block_type"] == "table" for block in canonical["source_blocks"])
             assert client.get(f"/api/v1/documents/{doc['id']}/file").content == original
+            if fmt in ("doc", "docx") and settings.allow_native_office:
+                preview = client.get(f"/api/v1/documents/{doc['id']}/preview")
+                assert preview.status_code == 200 and preview.content.startswith(b"%PDF-"), canonical["warnings"]
 
         for fmt, (_, code) in files.items():
             for mode in ("dense", "bm25", "hybrid"):
@@ -84,25 +88,61 @@ def test_real_embeddings_qdrant_and_document_lifecycle():
               "requests_per_s", len(timings) / (time.perf_counter()-started))
         print("embedding_resources", worker.embeddings.get_model_info())
         if os.environ.get("TRAG_LIVE_LLM") == "1":
-            before = time.perf_counter()
-            reply = client.post("/api/v1/chat", json={
-                "query": "Какая температурная уставка THERM-6 и какая мощность радиатора HX-9? Укажи оба числа.",
-                "provider": "local", "max_output_tokens": 256,
-            })
-            assert reply.status_code == 200, reply.text
-            result = reply.json()
-            assert {"md", "pdf"} <= {source["original_format"] for source in result["sources"]}, result
-            assert "45" in result["answer"] and "28" in result["answer"], result
-            print("real_llm_seconds", time.perf_counter()-before, "cited_formats",
-                  [source["original_format"] for source in result["sources"]])
-        for fmt, doc_id in documents.items():
-            previous = client.get(f"/api/v1/documents/{doc_id}").json()["active_version"]
-            assert client.post(f"/api/v1/documents/{doc_id}/reindex").status_code == 202
-            worker.run_once()
-            latest = client.get(f"/api/v1/documents/{doc_id}").json()["active_version"]
-            assert latest != previous and latest
-            assert client.delete(f"/api/v1/documents/{doc_id}").status_code == 202
-            worker.run_once()
-            assert client.get(f"/api/v1/documents/{doc_id}/file").status_code == 404
+            verify_generation(client, files)
+        verify_document_lifecycle(client, worker, documents)
+
+
+def verify_generation(client, files):
+    before = time.perf_counter()
+    reply = client.post("/api/v1/chat/stream", json={
+        "query": "Какая температурная уставка THERM-6 и какая мощность радиатора HX-9? Укажи оба числа.",
+        "provider": "local", "max_output_tokens": 256, "temperature": 0,
+    })
+    assert reply.status_code == 200 and "event: token" in reply.text and "event: final" in reply.text, reply.text
+    result = json.loads(reply.text.split("event: final\ndata: ", 1)[1].split("\n", 1)[0])
+    assert {"md", "pdf"} <= {source["original_format"] for source in result["sources"]}, result
+    assert "45" in result["answer"] and "28" in result["answer"], result
+    print("real_llm_seconds", time.perf_counter()-before, "cited_formats",
+          [source["original_format"] for source in result["sources"]])
+    questions = {
+        "pdf": ("Какую мощность рассеивает HX-9? Укажи источник.", "28"),
+        "doc": ("Какое выходное напряжение SP-32? Укажи источник.", "24"),
+        "docx": ("Сколько минут прогревают CL-8? Укажи источник.", "18"),
+        "txt": ("Сколько минут длится горячее плато? Укажи источник.", "90"),
+        "md": ("Какова температурная уставка THERM-6? Укажи источник.", "45"),
+        "html": ("Как часто NG-4 опрашивает TS-04? Укажи источник.", "200"),
+    }
+    for fmt in files:
+        question, marker = questions[fmt]
+        before = time.perf_counter()
+        answer = client.post("/api/v1/chat", json={"query": question, "provider": "local",
+            "temperature": 0, "max_output_tokens": 160, "filters": {"format": fmt}})
+        assert answer.status_code == 200, answer.text
+        result = answer.json()
+        assert marker in result["answer"], result
+        assert {source["original_format"] for source in result["sources"]} == {fmt}, result
+        print("real_llm_format", fmt, "seconds", time.perf_counter()-before, flush=True)
+    unavailable = client.post("/api/v1/chat", json={
+        "query": "Каков заводской серийный номер контроллера THERM-6? Если источник его не сообщает, прямо скажи об этом.",
+        "provider": "local", "temperature": 0, "max_output_tokens": 128, "filters": {"format": "md"},
+    })
+    assert unavailable.status_code == 200, unavailable.text
+    missing = unavailable.json()
+    assert missing["retrieved_sources"]
+    assert any(marker in missing["answer"].casefold() for marker in
+               ("не указан", "не привед", "нет", "отсутств", "не содержит", "не сообщ", "недостаточно")), missing
+    print("real_llm_missing_fact", "OK", flush=True)
+
+
+def verify_document_lifecycle(client, worker, documents):
+    for fmt, doc_id in documents.items():
+        previous = client.get(f"/api/v1/documents/{doc_id}").json()["active_version"]
+        assert client.post(f"/api/v1/documents/{doc_id}/reindex").status_code == 202
+        worker.run_once()
+        latest = client.get(f"/api/v1/documents/{doc_id}").json()["active_version"]
+        assert latest != previous and latest
+        assert client.delete(f"/api/v1/documents/{doc_id}").status_code == 202
+        worker.run_once()
+        assert client.get(f"/api/v1/documents/{doc_id}/file").status_code == 404
     worker.reconcile()
     assert worker.index.status()["points_count"] == 0

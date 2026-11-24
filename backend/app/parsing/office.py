@@ -32,9 +32,13 @@ def libreoffice(config) -> str | None:
         if binary:
             return binary
     if os.name == "nt":
-        candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "LibreOffice/program/soffice.com"
-        if candidate.is_file():
-            return str(candidate)
+        locations = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "LibreOffice/program/soffice.com",
+            config.data / "tools/libreoffice/extracted/program/soffice.com",
+        )
+        for candidate in locations:
+            if candidate.is_file():
+                return str(candidate)
     return None
 
 

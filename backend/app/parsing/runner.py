@@ -6,7 +6,6 @@ import socket
 import socketserver
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from uuid import UUID
@@ -15,6 +14,7 @@ import psutil
 
 from app.config import config
 from app.core.errors import AppError
+from app.core.logging import event
 from app.parsing.models import CanonicalDocument
 from app.storage.files import atomic_write
 
@@ -45,6 +45,8 @@ def kill_tree(process, children):
         except psutil.Error:
             pass
     process.wait(timeout=10)
+    if children:
+        psutil.wait_procs(children, timeout=2)
 
 
 def run_child(working: Path, timeout: int):
@@ -55,11 +57,12 @@ def run_child(working: Path, timeout: int):
     ) as process:
         deadline = time.monotonic() + timeout
         parent = psutil.Process(process.pid)
-        children = []
+        descendants = set()
         try:
             while process.poll() is None:
                 try:
                     children = parent.children(recursive=True)
+                    descendants.update(children)
                     memory = sum(proc.memory_info().rss for proc in [parent, *children] if proc.is_running())
                 except psutil.Error:
                     memory = 0
@@ -67,8 +70,8 @@ def run_child(working: Path, timeout: int):
                     raise AppError("parser_limit", "Превышен лимит времени или памяти парсера")
                 time.sleep(0.1)
         finally:
-            if process.poll() is None or children:
-                kill_tree(process, children)
+            if process.poll() is None or descendants:
+                kill_tree(process, list(descendants))
         if not (working / "outcome.json").is_file():
             raise AppError("parser_failure", "Процесс парсинга завершился без результата")
 
@@ -143,48 +146,62 @@ def office_status(settings):
         return "parser_unavailable"
 
 
-def parse_document(settings, files, doc: dict, version: str):
-    directory = files.temporary / version
-    with tempfile.TemporaryDirectory(prefix="parser-", dir=files.temporary) as local:
-        if settings.parser_socket:
-            directory.mkdir()
-        else:
-            directory = Path(local)
+def clear_work_directory(directory: Path):
+    target = directory
+    if os.name == "nt":
+        absolute = str(directory.resolve())
+        target = Path("\\\\?\\UNC\\" + absolute[2:] if absolute.startswith("\\\\") else "\\\\?\\" + absolute)
+    for attempt in range(4):
         try:
-            shutil.copyfile(files.original(doc["id"]), directory / f"input.{doc['format']}")
-            record = {key: doc[key] for key in
-                      ("id", "filename", "format", "mime", "sha256", "size", "created_at", "encoding_hint")}
-            atomic_write(directory / "record.json", json.dumps(record, ensure_ascii=False).encode())
-            if settings.parser_socket:
-                try:
-                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                        connection.settimeout(settings.parsing.timeout_seconds + 10)
-                        connection.connect(str(settings.parser_socket))
-                        connection.sendall(version.encode() + b"\n")
-                        reply = connection.makefile("rb").readline(4096)
-                    if reply.startswith(b"{"):
-                        error = json.loads(reply)
-                        raise AppError(error["code"], error["message"])
-                    if reply != b"ok\n":
-                        raise OSError
-                except OSError:
-                    raise AppError("parser_unavailable", "Изолированный сервис парсинга недоступен", 503,
-                                   retryable=True) from None
-            else:
-                run_child(directory, settings.parsing.timeout_seconds)
-            response = json.loads((directory / "outcome.json").read_bytes())
-            if not response.get("ok"):
-                raise AppError(response["code"], response["message"])
-            canonical = CanonicalDocument.model_validate_json((directory / "canonical.json").read_bytes())
-            if canonical.preview_file_path:
-                suffix = Path(canonical.preview_file_path).suffix[1:]
-                preview = files.preview(doc["id"], version, suffix)
-                atomic_write(preview, (directory / f"preview.{suffix}").read_bytes())
-                canonical.preview_file_path = preview.relative_to(settings.data).as_posix()
-            return canonical
-        finally:
-            if settings.parser_socket:
-                shutil.rmtree(directory, ignore_errors=True)
+            shutil.rmtree(target)
+            return
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError) and not directory.exists():
+                return
+            if attempt == 3:
+                event("parser_cleanup_deferred", error_type=type(exc).__name__)
+                return
+        time.sleep(0.2 * (attempt + 1))
+
+
+def parse_document(settings, files, doc: dict, version: str):
+    directory = files.temporary / str(UUID(version))
+    directory.mkdir()
+    try:
+        shutil.copyfile(files.original(doc["id"]), directory / f"input.{doc['format']}")
+        record = {key: doc[key] for key in
+                  ("id", "filename", "format", "mime", "sha256", "size", "created_at", "encoding_hint")}
+        atomic_write(directory / "record.json", json.dumps(record, ensure_ascii=False).encode())
+        if settings.parser_socket:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(settings.parsing.timeout_seconds + 10)
+                    connection.connect(str(settings.parser_socket))
+                    connection.sendall(version.encode() + b"\n")
+                    with connection.makefile("rb") as incoming:
+                        reply = incoming.readline(4096)
+                if reply.startswith(b"{"):
+                    error = json.loads(reply)
+                    raise AppError(error["code"], error["message"])
+                if reply != b"ok\n":
+                    raise OSError
+            except OSError:
+                raise AppError("parser_unavailable", "Изолированный сервис парсинга недоступен", 503,
+                               retryable=True) from None
+        else:
+            run_child(directory, settings.parsing.timeout_seconds)
+        response = json.loads((directory / "outcome.json").read_bytes())
+        if not response.get("ok"):
+            raise AppError(response["code"], response["message"])
+        canonical = CanonicalDocument.model_validate_json((directory / "canonical.json").read_bytes())
+        if canonical.preview_file_path:
+            suffix = Path(canonical.preview_file_path).suffix[1:]
+            preview = files.preview(doc["id"], version, suffix)
+            atomic_write(preview, (directory / f"preview.{suffix}").read_bytes())
+            canonical.preview_file_path = preview.relative_to(settings.data).as_posix()
+        return canonical
+    finally:
+        clear_work_directory(directory)
 
 
 if __name__ == "__main__":

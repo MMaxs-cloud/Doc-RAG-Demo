@@ -8,6 +8,11 @@ from app.parsing.models import CanonicalDocument
 
 REFERENCE = re.compile(r"\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]", re.I)
 REFERENCE_ID = re.compile(r"\bS\d+\b", re.I)
+PROSE_REFERENCE = re.compile(
+    r"(?P<label>\b(?:источник(?:а(?:х|ми)?|е|и|ов|ом|у|ам)?|sources?)\s*(?:№\s*)?)"
+    r"(?P<ids>S\d+(?:(?:\s*[,;]\s*|\s+(?:и|and)\s+)S\d+)*)\b",
+    re.I,
+)
 ANSWER_LINK = re.compile(r"\[([^\]\n]+)\]\((?:https?://|/)[^\s)]+\)|https?://[^\s<>\])]+", re.I)
 
 
@@ -118,7 +123,11 @@ class CitationResolver:
                     warnings.append("invalid_citations")
             return "[" + ", ".join(valid) + "]" if valid else ""
 
-        cleaned = ANSWER_LINK.sub(lambda match: match[1] or "", REFERENCE.sub(replace, answer)).strip()
+        normalized = PROSE_REFERENCE.sub(
+            lambda match: f"{match['label']}[{', '.join(REFERENCE_ID.findall(match['ids']))}]",
+            answer,
+        )
+        cleaned = ANSWER_LINK.sub(lambda match: match[1] or "", REFERENCE.sub(replace, normalized)).strip()
         if not found:
             warnings.append("no_citations")
         return cleaned, list(found.values()), warnings

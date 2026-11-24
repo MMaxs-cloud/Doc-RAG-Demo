@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from app.chats import GenerationOptions
+from app.citations import CitationResolver
 from app.core.errors import AppError
 from app.generation.context import build_context, uncovered
 from app.generation.providers import CloudProvider
@@ -51,6 +52,18 @@ def test_cloud_retry_stream_quota_and_refresh(settings):
             await cloud.close()
 
     asyncio.run(run())
+
+
+def test_prose_citations_are_verified_without_converting_sensor_names(monkeypatch):
+    resolver = CitationResolver(None)
+    monkeypatch.setattr(resolver, "current", lambda source: source["source_id"] != "S2")
+    sources = [{"source_id": source_id} for source_id in ["S1", "S2", "S3"]]
+    answer, cited, warnings = resolver.validate(
+        "Датчик S86. По данным из источника S1 и S2. See source S3 and S999.", sources
+    )
+    assert answer == "Датчик S86. По данным из источника [S1]. See source [S3]."
+    assert [source["source_id"] for source in cited] == ["S1", "S3"]
+    assert warnings == ["invalid_citations"]
 
 
 def test_context_does_not_repeat_overlapping_text():

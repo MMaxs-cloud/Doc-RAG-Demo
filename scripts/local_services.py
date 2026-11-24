@@ -4,10 +4,12 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import socket
 from contextlib import closing
 import subprocess
 import sys
 import time
+from urllib.parse import urlsplit
 
 import httpx
 import psutil
@@ -79,6 +81,22 @@ def wait_worker(process, database, started):
     raise RuntimeError("Worker did not register its heartbeat. Inspect data/run/worker.log.")
 
 
+def choose_local_model_port(value):
+    url = urlsplit(value)
+    if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost") or url.path not in ("", "/"):
+        raise RuntimeError("Set a loopback TRAG_LOCAL_URL or use -WithoutLocalModel with an existing server.")
+    port = url.port or 8080
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            if port != 8080:
+                raise RuntimeError(f"Local model port {port} is already occupied.") from None
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+    return port
+
+
 def start(options):
     if any(tracked(item) for item in read_registry()):
         raise RuntimeError("Already running. Run scripts/stop.ps1 first.")
@@ -105,18 +123,24 @@ def start(options):
     }
     if not options.without_local_model:
         llama = shutil.which("llama-server") or env.get("TRAG_LLAMA_EXE")
+        if not llama:
+            bundled = ROOT / "data/tools/llama/llama-server.exe"
+            llama = str(bundled) if bundled.is_file() else None
         model = Path(env.get("TRAG_GGUF_PATH", ROOT / "data/models/GigaChat3.1-10B-A1.8B-q4_K_M.gguf"))
         if not llama or not model.is_file():
             raise RuntimeError("Install llama-server and download the GGUF, or use -WithoutLocalModel.")
-        targets["llama"] = ([llama, "--model", str(model), "--alias", "GigaChat3.1-10B-A1.8B",
-                            "--host", "127.0.0.1", "--port", "8080", "--ctx-size", "8192", "--parallel", "1",
-                            "--jinja", "--n-gpu-layers", str(options.gpu_layers)], ROOT)
+        port = choose_local_model_port(env.get("TRAG_LOCAL_URL", "http://127.0.0.1:8080"))
+        env["TRAG_LOCAL_URL"] = f"http://127.0.0.1:{port}"
+        llama_command = [llama, "--model", str(model), "--alias", "GigaChat3.1-10B-A1.8B",
+                         "--host", "127.0.0.1", "--port", str(port), "--ctx-size", "8192", "--parallel", "1",
+                         "--jinja", "--n-gpu-layers", str(options.gpu_layers)]
+        targets = {"llama": (llama_command, ROOT), **targets}
     readiness = {
         "qdrant": "http://127.0.0.1:6333/",
         "embeddings": "http://127.0.0.1:8091/health",
         "backend": "http://127.0.0.1:8000/api/v1/health",
         "frontend": "http://127.0.0.1:5173/",
-        "llama": "http://127.0.0.1:8080/health",
+        "llama": env.get("TRAG_LOCAL_URL", "http://127.0.0.1:8080").rstrip("/") + "/health",
     }
     records = []
     try:

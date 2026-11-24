@@ -1,4 +1,6 @@
+import os
 import time
+from pathlib import Path
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -10,6 +12,7 @@ from app.parsing.detector import DocumentFormatDetector
 from app.parsing.models import CanonicalBuilder, Extracted
 from app.parsing.office import libreoffice
 from app.parsing.registry import DocumentParserRegistry
+from app.parsing.runner import clear_work_directory
 from app.parsing.text import decode_source
 
 from conftest import DOCUMENTS, FIXTURES
@@ -65,6 +68,16 @@ def test_manual_encoding(tmp_path, encoding):
     path = tmp_path / "source.txt"
     path.write_bytes(text.encode(encoding))
     assert decode_source(path, encoding)[0] == text
+
+
+def test_parser_cleans_long_converter_paths(tmp_path):
+    work = tmp_path / "parser"
+    nested = work.joinpath(*["libreoffice-extension"] * 15)
+    target = Path("\\\\?\\" + str(nested)) if os.name == "nt" else nested
+    target.mkdir(parents=True)
+    (target / "artifact.xml").write_text("fixture", encoding="utf-8")
+    clear_work_directory(work)
+    assert not work.exists()
 
 
 def test_legacy_word_reports_missing_converter(tmp_path, settings):

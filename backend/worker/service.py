@@ -1,6 +1,5 @@
 import hashlib
 import json
-import shutil
 from uuid import UUID
 import threading
 import time
@@ -13,7 +12,7 @@ from app.core.logging import configure, event
 from app.embeddings import EmbeddingHTTP, tokenizer
 from app.jobs import Cancelled, Jobs, LostLease
 from app.parsing.models import CanonicalDocument
-from app.parsing.runner import office_status, parse_document
+from app.parsing.runner import clear_work_directory, office_status, parse_document
 from app.retrieval.qdrant import Qdrant
 from app.storage.database import Database
 from app.storage.files import Files, atomic_write
@@ -215,7 +214,7 @@ class Worker:
                         if self.db.one("SELECT 1 FROM indexing_jobs WHERE claim=? AND status='processing'", (item.name,)):
                             continue
                         if item.is_dir():
-                            shutil.rmtree(item)
+                            clear_work_directory(item)
                         else:
                             item.unlink(missing_ok=True)
                     elif item.is_dir() and not self.db.one("SELECT 1 FROM documents WHERE id=?", (item.name,)):
