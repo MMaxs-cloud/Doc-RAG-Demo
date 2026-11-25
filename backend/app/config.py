@@ -130,6 +130,8 @@ def config() -> Config:
     env = os.environ
     path = Path(env.get("TRAG_CONFIG", "configs/default.yaml"))
     defaults = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if pdf_device := env.get("TRAG_PDF_DEVICE"):
+        defaults["parsing"]["pdf_device"] = pdf_device
     values = {
         "data": Path(env.get("TRAG_DATA", "data")).resolve(),
         "qdrant_url": env.get("TRAG_QDRANT_URL", "http://127.0.0.1:6333"),

@@ -45,6 +45,7 @@ class SettingsPatch(BaseModel):
 
 class ChatRequest(SearchRequest):
     provider: Provider
+    free_chat: bool = False
     cloud_consent: bool = False
     session_id: UUID | None = None
     reuse_message_id: UUID | None = None

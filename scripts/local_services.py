@@ -122,7 +122,7 @@ def start(options):
         "frontend": ([node, "node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--strictPort"], ROOT / "frontend"),
     }
     if not options.without_local_model:
-        llama = shutil.which("llama-server") or env.get("TRAG_LLAMA_EXE")
+        llama = env.get("TRAG_LLAMA_EXE") or shutil.which("llama-server")
         if not llama:
             bundled = ROOT / "data/tools/llama/llama-server.exe"
             llama = str(bundled) if bundled.is_file() else None

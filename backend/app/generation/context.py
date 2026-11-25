@@ -24,20 +24,28 @@ def uncovered(start, end, previous):
 
 
 def messages(question, history, entries):
+    if entries is None:
+        return [{"role": "system", "content": "Отвечай на языке пользователя. Эта беседа использует историю чата без поиска по документам. Не выдумывай ссылки, цитаты или проверенные значения."},
+                *history, {"role": "user", "content": question}]
     context = json.dumps(entries, ensure_ascii=False)
     return [{"role": "system", "content": SYSTEM}, *history,
             {"role": "user", "content": f"Вопрос: {question}\n\nИсточники в JSON:\n{context}"}]
 
 
-async def build_context(provider, question, history, retrieved, options, max_sources):
+async def fit_history(provider, question, history, entries, options):
     available = provider.window - options.max_output_tokens - 64
     history = list(history)
-    base = await provider.count(messages(question, history, []))
+    base = await provider.count(messages(question, history, entries))
     while history and base > available:
         history = history[2:]
-        base = await provider.count(messages(question, history, []))
+        base = await provider.count(messages(question, history, entries))
     if base > available:
         raise AppError("generation_budget", "Вопрос и выходной лимит превышают окно модели", 422)
+    return history, base, available
+
+
+async def build_context(provider, question, history, retrieved, options, max_sources):
+    history, base, available = await fit_history(provider, question, history, [], options)
     budget = min(available, base + options.context_tokens)
     chosen, entries, used = [], [], {}
     for source in retrieved:

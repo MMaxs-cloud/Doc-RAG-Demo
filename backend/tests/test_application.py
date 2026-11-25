@@ -138,6 +138,45 @@ def test_full_api_round_trip_multiple_formats_and_generation(runtime):
     assert all(p["payload"]["document_id"] != doc_id for p in index.points.values())
 
 
+def test_timeout_reuses_retrieval_and_free_chat_skips_it(runtime, monkeypatch):
+    client, worker, index = runtime
+    upload(client, "txt")
+    queued = client.get("/api/v1/documents").json()["items"][0]
+    assert queued["job"]["ahead"] == 0
+    assert worker.run_once()
+    session = client.post("/api/v1/chat/sessions", json={}).json()["id"]
+    request = {"query": "Показания датчика", "provider": "local", "session_id": session}
+
+    async def timeout(self, messages, options):
+        yield "Незавершённый ответ"
+        raise AppError("provider_timeout", "Превышено время генерации", 504)
+
+    monkeypatch.setattr(FakeLLM, "stream", timeout)
+    stream = client.post("/api/v1/chat/stream", json=request).text
+    assert stream.index('"searching"') < stream.index('"reading"') < stream.index('"generating"')
+    assert "provider_timeout" in stream
+    failed = client.get(f"/api/v1/chat/sessions/{session}").json()["messages"][0]
+    assert failed["warnings"] == ["generation_timeout"] and len(failed["retrieved"]) == 1
+
+    def unexpected_search(*args, **kwargs):
+        pytest.fail("Retry and free chat should skip search")
+
+    async def answer(self, messages, options):
+        if messages[-1]["content"] == "Привет":
+            assert all("Незавершённый ответ" not in message["content"] for message in messages)
+            yield "Здравствуйте"
+        else:
+            assert options.context_tokens == 1000 and '"id": "S1"' in messages[-1]["content"]
+            yield "Проверенное значение [S1]"
+
+    monkeypatch.setattr(index, "query", unexpected_search)
+    monkeypatch.setattr(FakeLLM, "stream", answer)
+    reply = client.post("/api/v1/chat", json={**request, "reuse_message_id": failed["id"], "context_tokens": 1000})
+    assert reply.status_code == 200 and reply.json()["retrieved_sources"] == failed["retrieved"]
+    free = client.post("/api/v1/chat", json={**request, "query": "Привет", "free_chat": True}).json()
+    assert free["answer"] == "Здравствуйте" and free["warnings"] == ["free_chat"] and not free["sources"]
+
+
 def test_worker_lease_cancel_and_reconcile(runtime):
     client, worker, index = runtime
     doc = upload(client, "txt")

@@ -188,4 +188,12 @@
   .pdf-paper { position: relative; width: max-content; max-width: 100%; margin: auto }
   .pdf-paper canvas { display: block; max-width: 100%; height: auto; background: white; box-shadow: var(--shadow) }
   .pdf-mark { position: absolute; pointer-events: none; border: 1px solid #0d655f55; background: #38ab7826 }
+  .pdf-cell-mark { outline: 2px solid #bd6500; background: #ffc45b77 }
+  .source-table { margin: 0 0 14px; padding: 10px; border: 1px solid var(--line); border-radius: 8px }
+  .source-table-scroll { max-height: 270px; overflow: auto; margin-top: 8px }
+  .source-table table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums }
+  .source-table th, .source-table td { border: 1px solid var(--line); text-align: left; padding: 4px 6px }
+  .source-table tr[data-selected=true] { background: var(--accent-bg) }
+  .table-cell { width: 100%; padding: 2px 4px; border: 0; background: transparent; text-align: left }
+  .table-cell[aria-pressed=true] { outline: 2px solid var(--accent); color: var(--accent-ink); font-weight: 650 }
 }

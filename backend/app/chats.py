@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from app.core.errors import AppError
 from app.core.logging import event
-from app.generation.context import build_context
+from app.generation.context import build_context, fit_history, messages as chat_messages
 from app.storage.database import uid
 
 
@@ -55,6 +55,7 @@ class Chats:
             return []
         self.session(session_id)
         rows = self.db.all("SELECT question,answer FROM chat_messages WHERE session_id=? AND created_at<? "
+                           "AND NOT EXISTS (SELECT 1 FROM json_each(chat_messages.warnings) WHERE value='generation_timeout') "
                            "ORDER BY created_at DESC LIMIT 3", (session_id, before or float("inf")))
         messages = []
         for row in reversed(rows):
@@ -116,12 +117,14 @@ class ChatService:
         settings = self.settings.get()
         session = str(request.session_id) if request.session_id else None
         warnings = []
+        free_chat = request.free_chat
         if request.reuse_message_id:
             if not session:
                 raise AppError("reuse_session_required", "Для повторной генерации нужен диалог", 422)
             original = self.chats.message(session, str(request.reuse_message_id))
             if request.query != original["question"]:
                 raise AppError("reuse_question_mismatch", "Повторная генерация использует исходный вопрос", 422)
+            free_chat = "free_chat" in original["warnings"]
             retrieved = [source for source in original["retrieved"] if self.citations.current(source)]
             if len(retrieved) != len(original["retrieved"]):
                 warnings.append("sources_changed")
@@ -131,31 +134,57 @@ class ChatService:
             query = request.query
             if len(query) < 100 and history:
                 query += "\n" + history[-2]["content"][:600]
-            retrieved = self.retrieval.search(query, request.mode or settings["mode"],
+            retrieved = [] if free_chat else self.retrieval.search(query, request.mode or settings["mode"],
                                               request.top_k or settings["top_k"], request.filters)
         opts = GenerationOptions(**{
             key: getattr(request, key) if getattr(request, key) is not None else settings[key]
             for key in ("temperature", "max_output_tokens", "context_tokens")
         })
-        return session, warnings, retrieved, history, opts
+        return session, warnings, retrieved, history, opts, free_chat
 
     def provider(self, request):
         if request.provider == "api":
-            if not self.config.cloud_allowed or not request.cloud_consent:
+            if not request.cloud_consent:
                 raise AppError("cloud_consent_required", "Передача фрагментов в GigaChat API требует явного разрешения", 403)
+            if not self.config.cloud_allowed:
+                raise AppError("cloud_disabled", "GigaChat API отключён в настройках сервера (TRAG_CLOUD_ALLOWED).", 403)
             if not self.config.gigachat_credentials or not self.config.gigachat_model:
                 raise AppError("cloud_not_configured", "GigaChat API не настроен на сервере", 503)
         return self.providers[request.provider]
 
-    async def stream(self, request, provider):
-        session, warnings, retrieved, history, opts = await asyncio.to_thread(self.prepare, request)
+    async def stream(self, request, provider, *, recover_timeout=False):
+        yield "stage", {"stage": "preparing" if request.free_chat or request.reuse_message_id else "searching"}
+        session, warnings, retrieved, history, opts, free_chat = await asyncio.to_thread(self.prepare, request)
+        if free_chat:
+            warnings.append("free_chat")
+        yield "stage", {"stage": "reading", "sources": retrieved}
         started = time.perf_counter()
         sources, messages = [], []
-        if retrieved:
-            messages, sources = await build_context(provider, request.query, history, retrieved, opts,
-                                                    self.config.context.max_sources)
         message_id = uid()
-        if not sources:
+        parts, first_token = [], None
+        try:
+            if free_chat:
+                history, _, _ = await fit_history(provider, request.query, history, None, opts)
+                messages = chat_messages(request.query, history, None)
+            elif retrieved:
+                messages, sources = await build_context(provider, request.query, history, retrieved, opts,
+                                                        self.config.context.max_sources)
+            if free_chat or sources:
+                async for piece in provider.stream(messages, opts):
+                    if first_token is None:
+                        first_token = time.perf_counter()
+                        yield "stage", {"stage": "generating"}
+                    parts.append(piece)
+                    yield "token", {"text": piece}
+        except AppError as exc:
+            if not recover_timeout or exc.code != "provider_timeout":
+                raise
+            warnings.append("generation_timeout")
+            await asyncio.to_thread(self.chats.store, session, request.query, "".join(parts), request.provider,
+                                    retrieved, [], warnings, message_id)
+            yield "error", {"code": exc.code, "message": exc.message, "message_id": message_id if session else None}
+            return
+        if not sources and not free_chat:
             cyrillic = any("а" <= ch <= "я" or ch == "ё" for ch in request.query.lower())
             answer = ("В доступных фрагментах корпуса недостаточно информации для ответа." if cyrillic
                       else "The available sources do not contain enough information to answer.")
@@ -163,12 +192,10 @@ class ChatService:
             citations = []
             yield "token", {"text": answer}
         else:
-            parts, first_token = [], None
-            async for piece in provider.stream(messages, opts):
-                first_token = first_token or time.perf_counter()
-                parts.append(piece)
-                yield "token", {"text": piece}
-            answer, citations, validation = await asyncio.to_thread(self.citations.validate, "".join(parts), sources)
+            answer = "".join(parts)
+            citations, validation = [], []
+            if not free_chat:
+                answer, citations, validation = await asyncio.to_thread(self.citations.validate, answer, sources)
             if not answer:
                 answer = "Модель вернула пустой ответ."
                 validation.append("empty_response")

@@ -3,6 +3,11 @@ import { Download, FileText, FolderOpen, RefreshCw, Search, Square, Trash2, Uplo
 import { api, formats, json, statusLabels, type DocumentItem, type Page } from './api'
 import type { OpenDocument } from './DocumentViewer'
 
+const stageLabels: Record<string, string> = {
+  validation: 'Проверка файла', conversion: 'Конвертация', parsing: 'Разбор документа',
+  canonicalization: 'Подготовка текста', chunking: 'Разбиение на фрагменты',
+  embedding: 'Расчёт эмбеддингов', indexing: 'Запись в индекс', finalizing: 'Сохранение результата'
+}
 export function DocumentsPage({ open }: { open: (doc: OpenDocument) => void }) {
   const [list, setList] = useState<Page<DocumentItem>>({ items: [], total: 0, offset: 0, limit: 15 })
   const [query, setQuery] = useState('')
@@ -111,7 +116,12 @@ export function DocumentsPage({ open }: { open: (doc: OpenDocument) => void }) {
           {doc.job?.error_message && <span className="file-error">{doc.job.error_message}</span>}</td>
         <td><span className="format-tag">{doc.format.toUpperCase()}</span></td>
         <td><span className={`status-pill ${doc.status}`}>{statusLabels[doc.status]}</span>
-          {doc.status === 'processing' && <progress max={100} value={doc.job?.progress ?? 0} aria-label="Прогресс индексации"/>}</td>
+          {doc.status === 'processing' && <>
+            <small>{stageLabels[doc.job?.stage ?? ''] ?? 'Обработка документа'}</small>
+            <progress max={100} value={doc.job?.progress ?? 0} aria-label="Прогресс индексации"/>
+          </>}
+          {doc.status === 'pending' && doc.job?.ahead !== undefined && <small>Заданий впереди: {doc.job.ahead}</small>}
+        </td>
         <td>{doc.chunk_count ?? '—'}</td>
         <td>{new Date(doc.created_at * 1000).toLocaleDateString('ru-RU')}</td>
         <td><div className="inline actions">

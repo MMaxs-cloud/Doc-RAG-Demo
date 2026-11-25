@@ -125,6 +125,14 @@ class Documents:
                 job = db.execute("SELECT id,kind,status,stage,progress,error_code,error_message FROM indexing_jobs WHERE id=?",
                                  (item["job_id"],)).fetchone()
                 item["job"] = dict(job) if job else None
+                if job and job["status"] == "pending":
+                    item["job"]["ahead"] = db.execute(
+                        """SELECT count(*) FROM indexing_jobs j JOIN indexing_jobs current ON current.id=?
+                           JOIN documents d ON d.id=j.document_id
+                           WHERE ((j.kind='index' AND d.deleted_at IS NULL) OR (j.kind='delete' AND d.deleted_at IS NOT NULL))
+                           AND (j.status='processing' OR (j.status='pending' AND
+                                (j.kind,j.created_at) < (current.kind,current.created_at)))""", (job["id"],)
+                    ).fetchone()[0]
                 items.append(item)
             total = db.execute("SELECT count(*) FROM documents d" + condition, args).fetchone()[0]
         return {"items": items, "total": total, "offset": offset, "limit": limit}

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Activity, ArrowUp, BookOpen, ChevronRight, CircleHelp, Copy, Database, Download,
-  FileText, FolderOpen, MessageSquare, Moon, Plus, RefreshCw, Search, Settings2, Square, Sun, Trash2 } from 'lucide-react'
-import { api, formats, json, locationLabel, statusLabels, streamChat, type Diagnostics, type Page,
+  FileText, FolderOpen, MessageSquare, Moon, Plus, RefreshCw, Settings2, Square, Sun, Trash2 } from 'lucide-react'
+import { api, ChatStreamError, formats, json, locationLabel, statusLabels, streamChat, type ChatStage, type Diagnostics, type Page,
   type Preferences, type Provider, type ProviderStatus, type Session, type Settings, type Source, type Turn } from './api'
 import { DocumentViewer, type OpenDocument } from './DocumentViewer'
 import { DocumentsPage } from './DocumentsPage'
@@ -20,7 +20,12 @@ const warningLabels: Record<string, string> = {
   no_citations: 'Ответ модели не содержит проверенных ссылок.',
   no_context: 'Для ответа не нашлось доступного контекста.',
   sources_changed: 'Часть исходных фрагментов изменена или удалена.',
-  empty_response: 'Модель вернула пустой ответ.'
+  empty_response: 'Модель вернула пустой ответ.',
+  generation_timeout: 'Истекло время генерации. Ответ мог оборваться.'
+}
+const stageLabels: Record<ChatStage, string> = {
+  searching: 'Ищу источники…', preparing: 'Подготавливаю запрос…',
+  reading: 'Модель читает контекст…', generating: 'Генерирую ответ…'
 }
 
 function getRoute(): Route {
@@ -43,8 +48,8 @@ function SourceCard({ source, group, open }: { source: Source; group: string; op
   </article>
 }
 
-function Answer({ turn, busy, open, regenerate }: {
-  turn: Turn; busy?: boolean; open: (doc: OpenDocument) => void; regenerate?: () => void
+function Answer({ turn, busy, stage, open, regenerate }: {
+  turn: Turn; busy?: boolean; stage?: ChatStage; open: (doc: OpenDocument) => void; regenerate?: () => void
 }) {
   const sources = [...turn.cited, ...turn.retrieved.filter(item => !turn.cited.find(cited => cited.source_id === item.source_id))]
   const [copied, setCopied] = useState(false)
@@ -52,25 +57,26 @@ function Answer({ turn, busy, open, regenerate }: {
   return <section className="answer">
     <div className="answer-heading"><span className="assistant-icon"><Database size={16}/></span>
       <strong>{turn.answer || busy ? providers[turn.provider] : 'Результаты поиска'}</strong>
-      {busy && <span className="muted">Генерация…</span>}
+      {turn.warnings.includes('free_chat') && <span className="muted">Без поиска по документам</span>}
+      {busy && stage && <span className="muted" role="status">{stageLabels[stage]}</span>}
     </div>
     {turn.answer && <div className="answer-text">{parts.map((part, index) => {
       const ids = part.match(/S\d+/gi)
       if (index % 2 === 0 || !ids || !ids.every(id => sources.some(source => source.source_id === id.toUpperCase()))) return part
       return ids.map(id => <button className="citation-id" key={id} onClick={() => {
-        const target = document.getElementById(`${turn.id}-${id.toUpperCase()}`)
-        target?.scrollIntoView({ behavior: 'smooth', block: 'center' }); target?.focus({ preventScroll: true })
+        const source = sources.find(item => item.source_id === id.toUpperCase())
+        if (source) open({ id: source.document_id, source, answerContext: parts[index - 1]?.trim().split('\n').at(-1) })
       }}>{id.toUpperCase()}</button>)
     })}</div>}
-    {turn.warnings.map(warning => <p key={warning} className="notice" role="status">{warningLabels[warning] ?? warning}</p>)}
+    {turn.warnings.filter(warning => warning !== 'free_chat').map(warning => <p key={warning} className="notice" role="status">{warningLabels[warning] ?? warning}</p>)}
     {sources.length > 0 && <div className="source-results">
       <h3>{turn.cited.length ? 'Источники и найденные фрагменты' : 'Найденные фрагменты'} <span>{sources.length}</span></h3>
       {sources.map(source => <SourceCard key={source.source_id} group={turn.id} source={source} open={open}/>)}
     </div>}
-    {!busy && turn.answer && <div className="inline answer-actions">
-      <button className="text-button" onClick={() => { void navigator.clipboard.writeText(turn.answer).then(() => setCopied(true)) }}>
-        <Copy size={15}/>{copied ? 'Скопировано' : 'Копировать'}</button>
-      {regenerate && <button className="text-button" onClick={regenerate}><RefreshCw size={15}/> Повторить генерацию</button>}
+    {!busy && (turn.answer || regenerate) && <div className="inline answer-actions">
+      {turn.answer && <button className="text-button" onClick={() => { void navigator.clipboard.writeText(turn.answer).then(() => setCopied(true)) }}>
+        <Copy size={15}/>{copied ? 'Скопировано' : 'Копировать'}</button>}
+      {regenerate && <button className="text-button" onClick={regenerate}><RefreshCw size={15}/>{turn.warnings.includes('generation_timeout') && !turn.warnings.includes('free_chat') ? 'Повторить с меньшим контекстом' : 'Повторить генерацию'}</button>}
     </div>}
   </section>
 }
@@ -83,7 +89,8 @@ function ChatPage({ sessionId, setSession, refreshSessions, preferences, open }:
   const [turns, setTurns] = useState<Turn[]>([])
   const [active, setActive] = useState<Turn | null>(null)
   const [provider, setProvider] = useState(preferences.provider)
-  const [onlySearch, setOnlySearch] = useState(false)
+  const [chatMode, setChatMode] = useState<'grounded' | 'search' | 'free'>('grounded')
+  const [stage, setStage] = useState<ChatStage>('searching')
   const [format, setFormat] = useState('')
   const [consent, setConsent] = useState(false)
   const [error, setError] = useState('')
@@ -107,6 +114,8 @@ function ChatPage({ sessionId, setSession, refreshSessions, preferences, open }:
   async function run(value: string, reuse?: Turn) {
     const text = value.trim()
     if (!text || request.current) return
+    const freeChat = reuse ? reuse.warnings.includes('free_chat') : chatMode === 'free'
+    const onlySearch = chatMode === 'search' && !reuse
     if ((!onlySearch || reuse) && provider === 'api' && !consent) {
       setError('Подтвердите передачу фрагментов в GigaChat API.'); return
     }
@@ -114,7 +123,10 @@ function ChatPage({ sessionId, setSession, refreshSessions, preferences, open }:
     request.current = controller
     setError(''); setQuestion('')
     const id = crypto.randomUUID()
-    const draft: Turn = { id, question: text, answer: '', provider, cited: [], retrieved: [], warnings: [] }
+    const draft: Turn = { id, question: text, answer: '', provider, cited: [], retrieved: [], warnings: freeChat ? ['free_chat'] : [] }
+    let streamedAnswer = ''
+    let streamedSources: Source[] = []
+    setStage(freeChat || reuse ? 'preparing' : 'searching')
     setActive(draft)
     let newlyCreatedSession: string | null = null
     try {
@@ -129,18 +141,32 @@ function ChatPage({ sessionId, setSession, refreshSessions, preferences, open }:
           newlyCreatedSession = sid = session.id
         }
         const result = await streamChat({ ...body, session_id: sid, provider, cloud_consent: consent,
-          reuse_message_id: reuse?.id }, token => {
+          free_chat: freeChat, reuse_message_id: reuse?.id,
+          context_tokens: reuse?.warnings.includes('generation_timeout') && !freeChat ? Math.max(256, Math.floor(preferences.context_tokens / 2)) : undefined }, token => {
+          streamedAnswer += token
           setActive(old => old ? { ...old, answer: old.answer + token } : old)
-        }, controller.signal)
+        }, controller.signal, (next, sources) => {
+          setStage(next)
+          if (sources) {
+            streamedSources = sources
+            setActive(old => old ? { ...old, retrieved: sources } : old)
+          }
+        })
         setTurns(old => [...old, { ...draft, id: result.message_id, answer: result.answer, cited: result.sources,
           retrieved: result.retrieved_sources, warnings: result.warnings }])
         if (newlyCreatedSession) setSession(newlyCreatedSession)
         refreshSessions()
       }
     } catch (error) {
-      if (!controller.signal.aborted) setError((error as Error).message)
-      else setError('Запрос отменён.')
-      if (!reuse) setQuestion(text)
+      if (error instanceof ChatStreamError && error.messageId) {
+        setTurns(old => [...old, { ...draft, id: error.messageId!, answer: streamedAnswer,
+          retrieved: streamedSources, warnings: [...draft.warnings, 'generation_timeout'] }])
+        if (newlyCreatedSession) setSession(newlyCreatedSession)
+        refreshSessions()
+      } else {
+        setError(controller.signal.aborted ? 'Запрос отменён.' : (error as Error).message)
+        if (!reuse) setQuestion(text)
+      }
     } finally {
       request.current = null; setActive(null)
     }
@@ -157,36 +183,38 @@ function ChatPage({ sessionId, setSession, refreshSessions, preferences, open }:
     <div className="chat-feed" ref={feed}>
       {!turns.length && !active && <div className="welcome">
         <div className="welcome-icon"><BookOpen size={28} strokeWidth={1.7}/></div>
-        <h2>Что найти в документах?</h2>
-        <p>Задайте вопрос по вашему корпусу. В ответе будут исходные фрагменты и ссылки на документы.</p>
-        <a className="text-button" href="#documents"><FolderOpen size={16}/> Открыть документы <ChevronRight size={15}/></a>
+        <h2>{chatMode === 'free' ? 'О чём поговорим?' : 'Что найти в документах?'}</h2>
+        {chatMode === 'free' ? <p>Модель использует историю этого чата.</p> : <>
+          <p>Задайте вопрос по вашему корпусу. В ответе будут исходные фрагменты и ссылки на документы.</p>
+          <a className="text-button" href="#documents"><FolderOpen size={16}/> Открыть документы <ChevronRight size={15}/></a>
+        </>}
       </div>}
       {turns.map(turn => <div className="turn" key={turn.id}>
         <div className="question">{turn.question}</div>
-        <Answer turn={turn} open={open} regenerate={turn.answer && !active && sessionId ? () => void run(turn.question, turn) : undefined}/>
+        <Answer turn={turn} open={open} regenerate={(turn.answer || turn.warnings.includes('generation_timeout')) && !active && sessionId ? () => void run(turn.question, turn) : undefined}/>
       </div>)}
       {active && <div className="turn"><div className="question">{active.question}</div>
-        {onlySearch && !active.answer ? <p className="muted">Поиск фрагментов…</p> : <Answer turn={active} open={open} busy/>}
+        <Answer turn={active} open={open} busy stage={stage}/>
       </div>}
     </div>
     <footer className="composer-area">
       {error && <p className="notice error" role="alert">{error}</p>}
-      {provider === 'api' && !onlySearch && <label className="cloud-consent">
-        <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)}/> Разрешаю отправить вопрос, историю и найденные фрагменты в GigaChat API
+      {provider === 'api' && <label className="cloud-consent">
+        <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)}/> Разрешаю отправить вопрос, историю и, при поиске, найденные фрагменты в GigaChat API
       </label>}
       <form className="composer" onSubmit={onSubmit}>
-        <textarea aria-label="Вопрос" placeholder="Спросите о содержании документов…" rows={2}
+        <textarea aria-label="Вопрос" placeholder={chatMode === 'free' ? 'Напишите сообщение…' : 'Спросите о содержании документов…'} rows={2}
           value={question} onChange={e => setQuestion(e.target.value)} maxLength={4000} onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void run(question) }
           }}/>
         <div className="composer-bar"><div className="inline">
-          <button type="button" className="mode-button" aria-pressed={onlySearch} onClick={() => setOnlySearch(!onlySearch)}>
-            {onlySearch ? <Search size={16}/> : <MessageSquare size={16}/>}
-            {onlySearch ? 'Только поиск' : 'Ответ с источниками'}
-          </button>
-          <select aria-label="Формат источников" value={format} onChange={e => setFormat(e.target.value)}>
-            <option value="">Все форматы</option>{formats.map(value => <option key={value} value={value}>{value.toUpperCase()}</option>)}
+          <select aria-label="Режим чата" value={chatMode} disabled={!!active} onChange={e => setChatMode(e.target.value as typeof chatMode)}>
+            <option value="grounded">Ответ с источниками</option><option value="search">Только поиск</option>
+            <option value="free">Свободный чат</option>
           </select>
+          {chatMode !== 'free' && <select aria-label="Формат источников" value={format} onChange={e => setFormat(e.target.value)}>
+            <option value="">Все форматы</option>{formats.map(value => <option key={value} value={value}>{value.toUpperCase()}</option>)}
+          </select>}
         </div>
         {active ? <button type="button" className="send" aria-label="Отменить запрос" onClick={() => request.current?.abort()}><Square size={16}/></button>
           : <button type="submit" className="send" aria-label="Отправить вопрос" disabled={!question.trim()}><ArrowUp size={19}/></button>}</div>

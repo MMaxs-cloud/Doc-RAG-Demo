@@ -72,17 +72,15 @@ test('upload, monitor, search, stream, open, download, switch and delete', async
   await expect(page.getByRole('progressbar')).toBeVisible()
   await expect(page.getByRole('cell', { name: 'Готов', exact: true })).toBeVisible()
   await page.getByRole('link', { name: 'Чат', exact: true }).click()
-  await page.getByRole('button', { name: 'Ответ с источниками' }).click()
+  await page.getByRole('combobox', { name: 'Режим чата' }).selectOption('search')
   await page.getByRole('textbox', { name: 'Вопрос' }).fill('TS-04')
   await page.getByRole('button', { name: 'Отправить вопрос' }).click()
   await expect(page.getByRole('heading', { name: /Найденные фрагменты/ })).toBeVisible()
-  await page.getByRole('button', { name: 'Только поиск' }).click()
+  await page.getByRole('combobox', { name: 'Режим чата' }).selectOption('grounded')
   await page.getByRole('textbox', { name: 'Вопрос' }).fill('Какой датчик используется?')
   await page.getByRole('button', { name: 'Отправить вопрос' }).click()
   await expect(page.getByText(/Стабилизацию проверяют/)).toBeVisible()
   await page.getByRole('button', { name: 'S1', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Открыть источник' })).toBeVisible()
-  await page.getByRole('button', { name: 'Открыть источник' }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
   await expect(page.getByRole('dialog').locator('.marked')).toContainText('TS-04')
   const download = page.waitForEvent('download')
@@ -101,6 +99,12 @@ test('upload, monitor, search, stream, open, download, switch and delete', async
 
 test('PDF.js renders the original test document and changes pages', async ({ page }) => {
   const pdf = await readFile('../tests/fixtures/mounting.pdf')
+  const table = { block_id: 'table', block_type: 'table', page_number: 2,
+    text: '| Test | Requirement | Unit |\n| --- | --- | --- |\n| Load | 28 | W |\n| Resistance | 0.35 | K/W |',
+    coordinates: { bbox: [55, 184, 400, 275], origin: 'top_left' } }
+  const source = { source_id: 'S1', document_id: 'pdf', document_version: 'v1', chunk_id: 'chunk',
+    original_format: 'pdf', original_filename: 'mounting.pdf', title: 'Mounting and heat load',
+    text: table.text, source_location: { start_page: 2, blocks: [table] } }
   const doc = { id: 'pdf', title: 'Mounting and heat load', filename: 'mounting.pdf', format: 'pdf',
     size: pdf.length, created_at: 1795495000, metadata: { page_count: 2 },
     status: 'ready', chunk_count: 1, active_version: 'v1', job: null }
@@ -109,7 +113,12 @@ test('PDF.js renders the original test document and changes pages', async ({ pag
     if (path.endsWith('/documents')) return route.fulfill({ json: { items: [doc], total: 1, offset: 0, limit: 15 } })
     if (path.endsWith('/documents/pdf')) return route.fulfill({ json: doc })
     if (path.endsWith('/documents/pdf/preview')) return route.fulfill({ body: pdf, contentType: 'application/pdf' })
-    if (path.endsWith('/chat/sessions')) return route.fulfill({ json: { items: [] } })
+    if (path.endsWith('/documents/pdf/content')) return route.fulfill({ json: { source_blocks: [table], warnings: [] } })
+    if (path.endsWith('/chat/sessions')) return route.fulfill({ json: { items: [{ id: 'table-chat', title: 'Таблица' }] } })
+    if (path.endsWith('/chat/sessions/table-chat')) return route.fulfill({ json: { messages: [{
+      id: 'table-answer', provider: 'local', question: 'Какая мощность?',
+      answer: 'Мощность составляет 28 Вт [S1].', cited: [source], retrieved: [source], warnings: []
+    }] } })
     if (path.endsWith('/health')) return route.fulfill({ json: { status: 'ok' } })
     return route.fulfill({ status: 404 })
   })
@@ -123,4 +132,11 @@ test('PDF.js renders the original test document and changes pages', async ({ pag
   await expect(viewer.getByText('Страница 2 из 2')).toBeVisible()
   await expect(viewer.getByText('Загрузка страницы…')).toBeHidden()
   await expect(viewer.getByRole('alert')).toHaveCount(0)
+  await viewer.getByRole('button', { name: 'Закрыть' }).click()
+  await page.getByRole('button', { name: 'Таблица', exact: true }).click()
+  await page.getByRole('button', { name: 'S1', exact: true }).click()
+  await expect(viewer.getByText('Страница 2 из 2')).toBeVisible()
+  await expect(viewer.getByRole('columnheader', { name: 'Requirement' })).toBeVisible()
+  await expect(viewer.getByRole('button', { name: '28', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(viewer.locator('.pdf-cell-mark')).toBeVisible()
 })

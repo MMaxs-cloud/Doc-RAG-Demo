@@ -327,7 +327,9 @@ def create_app(settings=None, *, services=None):
 
         async def events():
             try:
-                async for kind, payload in services.chat.stream(options, provider):
+                async for kind, payload in services.chat.stream(options, provider, recover_timeout=True):
+                    if kind == "error":
+                        payload["request_id"] = request.state.request_id
                     yield f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
             except AppError as exc:
                 payload = {"code": exc.code, "message": exc.message, "request_id": request.state.request_id}

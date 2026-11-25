@@ -2,7 +2,7 @@ export type Format = 'pdf' | 'doc' | 'docx' | 'txt' | 'md' | 'html'
 export type Mode = 'hybrid' | 'dense' | 'bm25'
 export type Provider = 'local' | 'api'
 export type Status = 'pending' | 'processing' | 'ready' | 'failed' | 'requires_ocr' | 'cancelled'
-export type Job = { id: string; status: Status; stage: string; progress: number; error_code?: string; error_message?: string }
+export type Job = { id: string; status: Status; stage: string; progress: number; ahead?: number; error_code?: string; error_message?: string }
 export type DocumentItem = {
   id: string; title: string; filename: string; format: Format; mime: string; size: number
   status: Status; created_at: number; active_version: string | null; chunk_count: number | null
@@ -22,6 +22,7 @@ export type Location = {
 }
 export type Source = {
   source_id: string; document_id: string; chunk_id: string; title: string
+  document_version?: string
   original_filename: string; original_format: Format; text: string; context_text?: string
   document_url: string; preview_url: string | null; source_location: Location
 }
@@ -98,7 +99,14 @@ export function parseEvent(frame: string) {
   return kind && body ? { kind, data: JSON.parse(body) } : null
 }
 
-export async function streamChat(body: object, onToken: (text: string) => void, signal: AbortSignal) {
+export type ChatStage = 'searching' | 'preparing' | 'reading' | 'generating'
+
+export class ChatStreamError extends Error {
+  constructor(message: string, readonly messageId?: string) { super(message) }
+}
+
+export async function streamChat(body: object, onToken: (text: string) => void, signal: AbortSignal,
+  onStage?: (stage: ChatStage, sources?: Source[]) => void) {
   const response = await fetch('/api/v1/chat/stream', json('POST', body, signal))
   if (!response.ok) throw new Error(await errorMessage(response))
   if (!response.body) throw new Error('Пустой поток ответа')
@@ -114,7 +122,8 @@ export async function streamChat(body: object, onToken: (text: string) => void, 
       for (const frame of frames) {
         const event = parseEvent(frame)
         if (event?.kind === 'token') onToken(event.data.text)
-        if (event?.kind === 'error') throw new Error(event.data.message)
+        if (event?.kind === 'stage') onStage?.(event.data.stage, event.data.sources)
+        if (event?.kind === 'error') throw new ChatStreamError(event.data.message, event.data.message_id)
         if (event?.kind === 'final') return event.data as Final
       }
     }
